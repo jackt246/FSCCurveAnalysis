@@ -11,11 +11,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow.keras import layers, models
-from sklearn.cluster import KMeans
+from sklearn.cluster import DBSCAN
 import umap
 import pandas as pd
 from scipy.interpolate import interp1d
 import argparse
+from mpl_toolkits.mplot3d import Axes3D
+import joblib
 
 parser = argparse.ArgumentParser(description="Train and cluster FSC curves.")
 args = parser.parse_args()
@@ -23,7 +25,7 @@ args = parser.parse_args()
 # Load an FSC curve
 # Load raw FSC curves as list of lists
 fsc_data = []
-with open("fsc_curves_normalisedandanchored.csv", "r") as f:
+with open("fsc_curves/fsc_curves_normalisedandanchored.csv", "r") as f:
     for line in f:
         try:
             values = [float(x) for x in line.strip().split(",") if x]
@@ -39,13 +41,30 @@ def resample_curve(curve, length=100):
         return np.full(length, np.nan)
     x_old = np.linspace(0, 1, len(curve))
     x_new = np.linspace(0, 1, length)
-    f = interp1d(x_old, curve, kind='linear', fill_value='extrapolate')
+    # Crucially, change fill_value to 'nan' to avoid bad extrapolation
+    f = interp1d(x_old, curve, kind='linear', fill_value='nan', bounds_error=False)
     return f(x_new)
 
 resampled_data = np.array([resample_curve(c, 100) for c in fsc_data])  # Use first 50 points
 
-# Remove rows with NaNs
-resampled_data = resampled_data[~np.isnan(resampled_data).any(axis=1)]
+# --- START: MISSING GLOBAL NORMALIZATION STEP ---
+
+# Calculate the minimum and maximum across the entire dataset
+data_min = np.min(resampled_data)
+data_max = np.max(resampled_data)
+
+# Scale all data simultaneously to the [0, 1] range
+# This is crucial because your decoder's final layer uses 'sigmoid'
+if data_max == data_min:
+    # Handle the trivial case where all data is the same
+    normalized_data = resampled_data
+else:
+    normalized_data = (resampled_data - data_min) / (data_max - data_min)
+
+# IMPORTANT: Replace resampled_data with normalized_data for all subsequent steps
+resampled_data = normalized_data
+
+# --- END: MISSING GLOBAL NORMALIZATION STEP ---
 
 # Step 2: Train a standard autoencoder
 input_dim = resampled_data.shape[1]
@@ -62,7 +81,7 @@ decoder = models.Sequential([
     layers.Input(shape=(10,)),
     layers.Dense(64, activation='relu'),
     layers.Dense(128, activation='relu'),
-    layers.Dense(input_dim, activation='sigmoid')  # sigmoid if input scaled to [0,1]
+    layers.Dense(input_dim, activation='linear')  # we have already normalised the data globally to between 0 and 1, so switching from sigmoid to linear
 ])
 
 autoencoder = models.Sequential([encoder, decoder])
@@ -70,12 +89,11 @@ autoencoder.compile(optimizer='adam', loss='mse')
 print("Training autoencoder")
 autoencoder.fit(resampled_data, resampled_data, epochs=30, batch_size=128, verbose=1)
 
-# Step 3: Get embeddings and cluster with KMeans
-print("Generating embeddings and clustering with KMeans")
+# Step 3: Get embeddings and cluster with DBSCAN
+print("Generating embeddings and clustering with DBSCAN")
 refined_embeddings = encoder.predict(resampled_data)
-n_clusters = 500
-kmeans = KMeans(n_clusters=n_clusters, n_init=20)
-labels = kmeans.fit_predict(refined_embeddings)
+dbscan = DBSCAN(eps=0.1, min_samples=5)
+labels = dbscan.fit_predict(refined_embeddings)
 
 # Optional: Visualize with UMAP
 print("Projecting with UMAP")
@@ -103,9 +121,9 @@ cluster_df = pd.DataFrame({
 # Save encoder model
 encoder.save("encoder_model.h5")
 
-# Save KMeans model
+# Save DBSCAN model
 import joblib
-joblib.dump(kmeans, "kmeans_model.pkl")
+joblib.dump(dbscan, "dbscan_model.pkl")
 
 # Save cluster metadata (e.g., frequencies for slider)
 cluster_counts = cluster_df['cluster'].value_counts().sort_index()
@@ -156,19 +174,22 @@ cols = 5
 rows = math.ceil(num_clusters / cols)
 plt.figure(figsize=(cols * 4, rows * 3))
 
-for i, cluster_id in enumerate(cluster_counts.index):
+# Sort clusters by size descending
+sorted_clusters = cluster_counts.sort_values(ascending=False)
+
+for i, cluster_id in enumerate(sorted_clusters.index):
     cluster_curves = np.stack(cluster_df[cluster_df['cluster'] == cluster_id]['curve'].values)
     avg_curve = cluster_curves.mean(axis=0)
 
     plt.subplot(rows, cols, i + 1)
     for curve in cluster_curves:
-        plt.plot(curve, color='gray', alpha=0.3)
-    plt.plot(avg_curve, color='red', linewidth=2)
-    plt.title(f"Cluster {cluster_id}")
+        plt.plot(curve, color='lightgray', alpha=0.3)
+    plt.plot(avg_curve, color='blue', linewidth=2)
+    plt.title(f"Cluster {cluster_id} (n={len(cluster_curves)})")
     plt.xticks([])
     plt.yticks([])
 
-plt.suptitle("FSC Curves per Cluster with Average", fontsize=16)
+plt.suptitle("FSC Curves per Cluster (grey) with Average (blue)", fontsize=16)
 plt.tight_layout(rect=[0, 0, 1, 0.96])
 plt.savefig("cluster_subplots.png", dpi=300)
 plt.close()

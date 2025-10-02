@@ -80,7 +80,7 @@ fsc_data = [fsc for fsc in results if fsc is not None]
 
 print(f"Got {len(fsc_data)} FSC curves")
 
-with open('fsc_curves.csv', 'w', newline='') as csvfile:
+with open('../clustering/fsc_curves/fsc_curves.csv', 'w', newline='') as csvfile:
     writer = csv.writer(csvfile)
     for curve in fsc_data:
         writer.writerow(curve)

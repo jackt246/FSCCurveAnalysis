@@ -23,7 +23,7 @@ args = parser.parse_args()
 # Load an FSC curve
 # Load raw FSC curves as list of lists
 fsc_data = []
-with open("fsc_curves_normalisedandanchored.csv", "r") as f:
+with open("fsc_curves/fsc_curves_normalisedandanchored.csv", "r") as f:
     for line in f:
         try:
             values = [float(x) for x in line.strip().split(",") if x]
