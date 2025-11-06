@@ -44,7 +44,7 @@ do_elbow_analysis = True
 # Load an FSC curve
 # Load raw FSC curves as list of lists
 fsc_data = []
-with open("fsc_curves/fsc_curves.csv", "r") as f:
+with open("fsc_curves/fsc_curves_normalisedandanchored.csv", "r") as f:
     for line in f:
         try:
             values = [float(x) for x in line.strip().split(",") if x]
@@ -93,11 +93,11 @@ encoder = models.Sequential([
     layers.Dense(128, activation='relu'),
     layers.Dropout(0.1),
     layers.Dense(64, activation='relu'),
-    layers.Dense(10, activation='linear')  # latent vector
+    layers.Dense(20, activation='linear')  # latent vector
 ])
 
 decoder = models.Sequential([
-    layers.Input(shape=(10,)),
+    layers.Input(shape=(20,)),
     layers.Dense(64, activation='relu'),
     layers.Dense(128, activation='relu'),
     layers.Dense(input_dim, activation='linear')  # we have already normalised the data globally to between 0 and 1, so switching from sigmoid to linear

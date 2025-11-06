@@ -1,88 +1,96 @@
-import requests
 import json
 import pandas as pd
-import concurrent.futures
-import csv
+from emdb.client import EMDB
+from tqdm import tqdm
+import os
 
-class FileImport:
-    def __init__(self):
-        self.apiURL = 'https://ebi.ac.uk/emdb/api/'
+client = EMDB()
 
-    def importValidation(self, entry, saveFile=False):
-        url = f'{self.apiURL}analysis/{entry}'
+#Get entries with half-maps from before 2025
+results = client.csv_search('half_map_filename:[* TO *] AND current_status:"REL" AND release_date:[2002-01-01T00:00:00Z TO 2025-06-30T23:59:59Z] AND database:EMDB')
+all_ids = results['emdb_id'].astype(str).tolist()
+#Prep a list to hold data during the iterations
+data_list = []
 
-        try:
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()  # Will raise an error if status code is not 200
+# Partial CSV file for progressive saving
+data_file = "fsc_curves_partial.csv"
 
-            try:
-                json_data = response.json()
-            except ValueError as e:
-                print(f"Failed to parse JSON for entry {entry}: {e}")
-                return None
+# Load partial data if it exists
+if os.path.exists(data_file):
+    saved_df = pd.read_csv(data_file)
+    data_list = saved_df.to_dict(orient="records")
+    processed_ids = set(str(i) for i in saved_df["id"].tolist())
+    print(f"Loaded {len(saved_df)} previously saved entries")
+else:
+    data_list = []
+    processed_ids = set()
 
-            if saveFile:
-                try:
-                    with open(f'{entry}_validation.json', 'w') as json_file:
-                        json.dump(json_data, json_file)
-                except Exception as e:
-                    print(f"Could not save file for entry {entry}: {e}")
+batch = []  # temporary batch to reduce I/O
+BATCH_SIZE = 50  # save every 50 processed entries
 
-            print(f"Successfully retrieved data for {entry}")
-            return json_data
-
-        except requests.exceptions.RequestException as e:
-            print(f"Request error for entry {entry}: {e}")
-            return None
-
-class EMDBsearcher():
-  def __init__(self):
-    self.apiURL = 'https://ebi.ac.uk/emdb/api/'
+unprocessed_ids = [i for i in all_ids if i not in processed_ids]
+print(f"Prefiltered down to {len(unprocessed_ids)} unprocessed entries")
 
 
-try:
-    df = pd.read_csv('emdb_withhalfmaps.csv')
-except FileNotFoundError:
-    print("Error: 'emdb_withhalfmaps.csv' not found. Please upload the file to the current working directory.")
-except pd.errors.ParserError:
-    print("Error: Could not parse the CSV file. Please check the file format.")
-except Exception as e:
-    print(f"An unexpected error occurred: {e}")
-
-EMDlist = df.values.tolist()
-
-fileimporter = FileImport()
-
-fsc_data = []
-
-def process_entry(entry):
-    entry_id = entry[0]  # assuming EMDlist is a list of tuples
-    json_data = fileimporter.importValidation(entry_id)
-
-    if json_data is None:
-        print(f"No data for {entry_id}, skipping.")
-        return None
-
+#populate the df with the entries in results
+for emdb_id in tqdm(unprocessed_ids, desc="Processing EMDB entries", unit="entry"):
     try:
-        data = list(json_data.values())[0]
-        fsc = data['fsc']['curves']['fsc']
-        return fsc
-    except KeyError:
-        print(f"No FSC data for {entry_id}, skipping.")
-        return None
+        entry = client.get_entry(emdb_id)
+        entry_id = entry.id
+        entry_method = entry.method
 
-# Use ThreadPoolExecutor with 20 workers
-with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-  results = list(executor.map(process_entry, EMDlist))
+        validation_data = entry.get_validation()
+        if not validation_data or not hasattr(validation_data, "plots"):
+            continue
 
-# Filter out failed (None) results
-fsc_data = [fsc for fsc in results if fsc is not None]
+        validation_graphs = validation_data.plots
+        if not hasattr(validation_graphs, "fsc"):
+            continue
 
-print(f"Got {len(fsc_data)} FSC curves")
+        fsc_curves = validation_graphs.fsc
 
-with open('../clustering/fsc_curves/fsc_curves.csv', 'w', newline='') as csvfile:
-    writer = csv.writer(csvfile)
-    for curve in fsc_data:
-        writer.writerow(curve)
+        resolution = getattr(fsc_curves, "resolution", None)
+        fsc_corrected = getattr(fsc_curves, "fsc_corrected", None)
+        fsc_masked = getattr(fsc_curves, "fsc_masked", None)
+        fsc_phaserandom = getattr(fsc_curves, "phaserandomization", None)
+        fsc_unmasked = getattr(fsc_curves, "fsc", None)
 
-print("FSC data saved to fsc_curves.csv")
+        entry_data = {
+            'id': entry_id,
+            'method': entry_method,
+            'resolution': resolution,
+            'fsc_corrected': fsc_corrected,
+            'fsc_phaserandom': fsc_phaserandom,
+            'fsc_masked': fsc_masked,
+            'fsc_unmasked': fsc_unmasked
+        }
+
+        data_list.append(entry_data)
+        batch.append(entry_data)
+
+        if len(batch) >= BATCH_SIZE:
+            pd.DataFrame(batch).to_csv(
+                data_file,
+                mode='a',
+                header=not os.path.exists(data_file),  # write headers only once
+                index=False
+            )
+            batch.clear()
+            print(f"Checkpoint saved ({len(processed_ids)} entries total)")
+
+    except Exception as e:
+        print(f"Failed to process {entry.id}: {e}")
+
+if batch:
+    pd.DataFrame(batch).to_csv(
+        data_file,
+        mode='a',
+        header=not os.path.exists(data_file),
+        index=False
+    )
+
+#a df to take the entry information
+columns = ['id', 'method', 'resolution', 'fsc_corrected', 'fsc_phaserandom', 'fsc_masked', 'fsc_unmasked']
+fsc_df = pd.DataFrame(data_list, columns=columns)
+
+fsc_df.to_csv("../clustering/fsc_curves/fsc_curves_all.csv", index=False)
