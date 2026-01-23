@@ -3,6 +3,18 @@ import pandas as pd
 from emdb.client import EMDB
 from tqdm import tqdm
 import os
+import numpy as np
+
+# Function to check if all elements are numeric
+def is_valid_number_array(arr):
+    if arr is None:
+        return False
+    try:
+        # Convert to numpy array and check if all elements are finite numbers
+        arr = np.array(arr, dtype=float)
+        return np.all(np.isfinite(arr))
+    except (ValueError, TypeError):
+        return False
 
 client = EMDB()
 
@@ -13,23 +25,34 @@ all_ids = results['emdb_id'].astype(str).tolist()
 data_list = []
 
 # Partial CSV file for progressive saving
-data_file = "fsc_curves_partial.csv"
+data_file = "fsc_curves_partial.json"
 
-# Load partial data if it exists
+# Prepare a processed list
+processed_list = []
+
 if os.path.exists(data_file):
-    saved_df = pd.read_csv(data_file)
-    data_list = saved_df.to_dict(orient="records")
-    processed_ids = set(str(i) for i in saved_df["id"].tolist())
-    print(f"Loaded {len(saved_df)} previously saved entries")
-else:
-    data_list = []
-    processed_ids = set()
+    with open(data_file, "r") as f:
+        loaded_data = json.load(f)
+    for entry in loaded_data:
+        # Convert FSC curves to NumPy arrays
+        for col in ['fsc_corrected', 'fsc_masked', 'fsc_phaserandom', 'fsc_unmasked']:
+            if col in entry:
+                curve = entry[col]
+                if curve is None:
+                    entry[col] = np.array([])
+                else:
+                    try:
+                        entry[col] = np.array(curve, dtype=float)
+                    except Exception:
+                        entry[col] = np.array([])
+        processed_list.append(entry)
+
 
 batch = []  # temporary batch to reduce I/O
 BATCH_SIZE = 50  # save every 50 processed entries
 
-unprocessed_ids = [i for i in all_ids if i not in processed_ids]
-print(f"Prefiltered down to {len(unprocessed_ids)} unprocessed entries")
+unprocessed_ids = [i for i in all_ids if i not in processed_list]
+print(f"Prefiltered down to {len(processed_list)} unprocessed entries")
 
 
 #populate the df with the entries in results
@@ -55,42 +78,39 @@ for emdb_id in tqdm(unprocessed_ids, desc="Processing EMDB entries", unit="entry
         fsc_phaserandom = getattr(fsc_curves, "phaserandomization", None)
         fsc_unmasked = getattr(fsc_curves, "fsc", None)
 
-        entry_data = {
-            'id': entry_id,
-            'method': entry_method,
-            'resolution': resolution,
-            'fsc_corrected': fsc_corrected,
-            'fsc_phaserandom': fsc_phaserandom,
-            'fsc_masked': fsc_masked,
-            'fsc_unmasked': fsc_unmasked
-        }
+        # Combine all data into a list
+        all_data = [resolution, fsc_corrected, fsc_masked, fsc_phaserandom, fsc_unmasked]
 
-        data_list.append(entry_data)
-        batch.append(entry_data)
+        # Only save the row if all data is valid
+        if all(is_valid_number_array(d) for d in all_data):
+            entry_data = {
+                'id': entry_id,
+                'method': entry_method,
+                'resolution': resolution,
+                'fsc_corrected': fsc_corrected,
+                'fsc_phaserandom': fsc_phaserandom,
+                'fsc_masked': fsc_masked,
+                'fsc_unmasked': fsc_unmasked
+            }
 
-        if len(batch) >= BATCH_SIZE:
-            pd.DataFrame(batch).to_csv(
-                data_file,
-                mode='a',
-                header=not os.path.exists(data_file),  # write headers only once
-                index=False
-            )
-            batch.clear()
-            print(f"Checkpoint saved ({len(processed_ids)} entries total)")
+            batch.append(entry_data)
+
+            if len(batch) >= BATCH_SIZE:
+                data_list.extend(batch)
+                with open(data_file, "w") as f:
+                    json.dump(data_list, f)
+                batch.clear()
+                print(f"Checkpoint saved ({len(processed_ids)} entries total)")
+        else:
+            # skip this row
+            continue
 
     except Exception as e:
         print(f"Failed to process {entry.id}: {e}")
-
-if batch:
-    pd.DataFrame(batch).to_csv(
-        data_file,
-        mode='a',
-        header=not os.path.exists(data_file),
-        index=False
-    )
 
 #a df to take the entry information
 columns = ['id', 'method', 'resolution', 'fsc_corrected', 'fsc_phaserandom', 'fsc_masked', 'fsc_unmasked']
 fsc_df = pd.DataFrame(data_list, columns=columns)
 
-fsc_df.to_csv("../clustering/fsc_curves/fsc_curves_all.csv", index=False)
+with open("../clustering/fsc_curves/fsc_curves_all.json", "w") as f:
+    json.dump(data_list, f)

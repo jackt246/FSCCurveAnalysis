@@ -2,92 +2,81 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import interp1d
 
+
 def find_crossing_point(y_values, threshold=0.143):
-    for i in range(6, len(y_values)):
-        if y_values[i-1] >= threshold and y_values[i] < threshold:
-            # Linear interpolation to find exact crossing
-            x0, x1 = i-1, i
-            y0, y1 = y_values[i-1], y_values[i]
-            return x0 + (threshold - y0) / (y1 - y0)
+    # Standard linear interpolation to find the fractional index
+    for i in range(1, len(y_values)):
+        if y_values[i - 1] >= threshold and y_values[i] < threshold:
+            y0, y1 = y_values[i - 1], y_values[i]
+            # fractional index = index_low + (how far we are through the gap)
+            return (i - 1) + (y0 - threshold) / (y0 - y1)
     return None
 
-def align_curve(y_values, crossing_index, target_index=80, output_length=100):
+
+def align_curve_properly(y_values, crossing_idx, target_idx=50, output_length=100):
     """
-    Piecewise warp curve so that the segment before the crossing_index stretches to [0, target_index]
-    and the segment after compresses to [target_index, output_length-1].
+    Correctly warps the curve so y_values[crossing_idx] moves to target_idx.
     """
-    original_length = len(y_values)
+    old_indices = np.arange(len(y_values))
 
-    # Create full x and y arrays
-    x = np.linspace(0, 1, original_length)
-    y = y_values
+    # 1. Create a map from the old indices to the new coordinate system
+    # We map: 0 -> 0, crossing_idx -> target_idx, max_idx -> output_length - 1
+    new_x_coords = np.linspace(0, output_length - 1, output_length)
 
-    # Identify the actual index (rounded) and corresponding x value
-    crossing_index_int = int(np.floor(crossing_index))
-    x_cross = x[crossing_index_int]
+    # Define the mapping: Original index -> Aligned index
+    # To interpolate the values, we actually need the inverse:
+    # Where does each "New Index" land in the "Old Index" space?
+    old_x_mapped_to_new = [0, crossing_idx, len(y_values) - 1]
+    new_x_mapped_to_new = [0, target_idx, output_length - 1]
 
-    # Create new x grid
-    x_new = np.linspace(0, 1, output_length)
+    # This function tells us: for a given index in our 100-pt output,
+    # which index should we look up in the original data?
+    mapping_func = interp1d(new_x_mapped_to_new, old_x_mapped_to_new, kind='linear')
 
-    # Split curve at crossing
-    x_left = x[:crossing_index_int + 1]
-    y_left = y[:crossing_index_int + 1]
-    x_right = x[crossing_index_int:]
-    y_right = y[crossing_index_int:]
+    # Find the corresponding old indices for every new index
+    source_indices = mapping_func(new_x_coords)
 
-    # New x segments
-    x_target_left = np.linspace(0, x_new[target_index], len(x_left))
-    x_target_right = np.linspace(x_new[target_index], 1, len(x_right))
+    # 2. Interpolate the actual Y values at those calculated source indices
+    final_interp = interp1d(old_indices, y_values, kind='linear', fill_value="extrapolate")
 
-    # Interpolators
-    f_left = interp1d(x_target_left, y_left, kind='linear', bounds_error=False, fill_value='extrapolate')
-    f_right = interp1d(x_target_right, y_right, kind='linear', bounds_error=False, fill_value='extrapolate')
+    return final_interp(source_indices)
 
-    # Final y using piecewise assembly
-    y_aligned = np.empty_like(x_new)
-    y_aligned[:target_index + 1] = f_left(x_new[:target_index + 1])
-    y_aligned[target_index:] = f_right(x_new[target_index:])
 
-    return y_aligned
+def process_fsc_dataframe(fsc_df, output_length=100, target_idx=50):
+    curve_columns = ['fsc_corrected', 'fsc_masked', 'fsc_unmasked']
+
+    # Work on a copy to avoid SettingWithCopy warnings
+    df = fsc_df.copy()
+
+    for col in curve_columns:
+        if col not in df.columns: continue
+
+        aligned_list = []
+        for curve in df[col]:
+            y = np.array(curve)
+            crossing = find_crossing_point(y)
+
+            if crossing is not None:
+                aligned = align_curve_properly(y, crossing, target_idx, output_length)
+                aligned_list.append(aligned.tolist())
+            else:
+                # If no crossing, just resample normally
+                f = interp1d(np.linspace(0, 1, len(y)), y)
+                aligned_list.append(f(np.linspace(0, 1, output_length)).tolist())
+
+        df[f"{col}_aligned"] = aligned_list
+
+    return df
 
 def resample_curve(y_values, output_length):
     x_original = np.linspace(0, 1, len(y_values))
-    f_interp = interp1d(x_original, y_values, kind='linear', bounds_error=False, fill_value='extrapolate')
-    x_resampled = np.linspace(0, 1, output_length)
-    return f_interp(x_resampled)
+    f = interp1d(x_original, y_values, bounds_error=False, fill_value='extrapolate')
+    return f(np.linspace(0, 1, output_length))
 
-def process_csv(input_csv, output_csv, output_length=100, target_anchor=0.5):
-    with open(input_csv, 'r') as f:
-        lines = [line.strip() for line in f if line.strip()]
-        curves = [np.array([float(val) for val in line.split(',') if val]) for line in lines]
-    aligned_curves = []
-    for idx, y in enumerate(curves):
-        y = resample_curve(y, output_length)  # Normalize length first
-        crossing = find_crossing_point(y)
-        if crossing is None:
-            print(f"Row {idx}: No 0.143 crossing — using unaligned resampling")
-            aligned = y
-        else:
-            aligned = align_curve(y, crossing, target_index=int(target_anchor * output_length), output_length=output_length)
-        aligned_curves.append(aligned)
-    pd.DataFrame(aligned_curves).to_csv(output_csv, index=False, header=False)
-
-    # Plot every 100th aligned curve for sanity checking
-    import matplotlib.pyplot as plt
-    plt.figure(figsize=(10, 6))
-    for i in range(0, len(aligned_curves), 100):
-        plt.plot(aligned_curves[i], alpha=0.5)
-    plt.title("Sanity check: every 100th aligned FSC curve")
-    plt.xlabel("Normalized frequency")
-    plt.ylabel("FSC value")
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
-
-# Example usage
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) != 3:
-        print("Usage: python fsc_curve_normalisation.py input.csv output.csv")
-        sys.exit(1)
-    process_csv(sys.argv[1], sys.argv[2])
+fsc_df = pd.read_json('fsc_curves/fsc_curves_all.json')
+fsc_df["fsc_unmasked"] = fsc_df["fsc_unmasked"].apply(np.asarray)
+fsc_df["fsc_masked"] = fsc_df["fsc_masked"].apply(np.asarray)
+fsc_df["fsc_corrected"] = fsc_df["fsc_corrected"].apply(np.asarray)
+fsc_df["fsc_phaserandom"] = fsc_df["fsc_phaserandom"].apply(np.asarray)
+processed_df = process_fsc_dataframe(fsc_df)
+processed_df.to_json('fsc_curves/fsc_curves_all_aligned.json', orient='records')

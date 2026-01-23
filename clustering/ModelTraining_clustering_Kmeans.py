@@ -5,10 +5,19 @@ from sklearn.cluster import KMeans
 import umap
 import pandas as pd
 from scipy.interpolate import interp1d
-import argparse
-from mpl_toolkits.mplot3d import Axes3D
+import os
+import random
+import tensorflow as tf
 import joblib
 from sklearn.metrics.pairwise import euclidean_distances
+
+def set_seeds(seed=42):
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
+    # For newer TensorFlow/Keras versions
+    tf.keras.utils.set_random_seed(seed)
 
 def elbow_analysis(refined_embeddings):
     print("Performing Elbow Analysis to find optimal number of clusters (K)")
@@ -38,33 +47,90 @@ def elbow_analysis(refined_embeddings):
 
     print(f"Elbow analysis plot saved to elbow_method_analysis.png. Review plot to confirm optimal K.")
 
+def find_crossing_point(y_values, threshold=0.143):
+    # Standard linear interpolation to find the fractional index
+    for i in range(1, len(y_values)):
+        if y_values[i - 1] >= threshold and y_values[i] < threshold:
+            y0, y1 = y_values[i - 1], y_values[i]
+            # fractional index = index_low + (how far we are through the gap)
+            return (i - 1) + (y0 - threshold) / (y0 - y1)
+    return None
+
+def edit_curve_based_on_crossing(y_values, target_idx=50, output_length=100):
+    """
+    Correctly warps the curve so y_values[crossing_idx] moves to target_idx. This anchors at 0.143
+    """
+    old_indices = np.arange(len(y_values))
+
+    # 1. Create a map from the old indices to the new coordinate system
+    # We map: 0 -> 0, crossing_idx -> target_idx, max_idx -> output_length - 1
+    new_x_coords = np.linspace(0, output_length - 1, output_length)
+
+    # Define the mapping: Original index -> Aligned index
+    # To interpolate the values, we actually need the inverse:
+    # Where does each "New Index" land in the "Old Index" space?
+    crossing = find_crossing_point(y_values)
+    if crossing is not None:
+        old_x_mapped_to_new = [0, crossing, len(y_values) - 1]
+        new_x_mapped_to_new = [0, target_idx, output_length - 1]
+    else:
+        # If no crossing found, do a simple resample without warping
+        return resample_curve(y_values, output_length)
+
+    # This function tells us: for a given index in our 100-pt output,
+    # which index should we look up in the original data?
+    mapping_func = interp1d(new_x_mapped_to_new, old_x_mapped_to_new, kind='linear')
+
+    # Find the corresponding old indices for every new index
+    source_indices = mapping_func(new_x_coords)
+
+    # 2. Interpolate the actual Y values at those calculated source indices
+    final_interp = interp1d(old_indices, y_values, kind='linear', fill_value="extrapolate")
+
+    return final_interp(source_indices)
+
+def resample_curve(curve, length=100):
+    """
+    Resamples a pre-cleaned numeric array to a fixed length using linear interpolation.
+    """
+    # Ensure input is a numpy array for math operations
+    y = np.asarray(curve, dtype=float)
+
+    # Remove NaNs to prevent the "squashed" 0.8-1.0 effect caused by trailing NaNs
+    y_clean = y[~np.isnan(y)]
+
+    # Safety check: need at least 2 points to interpolate
+    if len(y_clean) < 2:
+        return np.full(length, np.nan) if len(y_clean) == 0 else np.full(length, y_clean[0])
+
+    # x_old defines the current spacing (0 to 1)
+    x_old = np.linspace(0, 1, len(y_clean))
+    # x_new defines the target spacing (0 to 1 with 100 steps)
+    x_new = np.linspace(0, 1, length)
+
+    # Perform linear interpolation
+    f = interp1d(x_old, y_clean, kind='linear', bounds_error=False,
+                 fill_value=(y_clean[0], y_clean[-1]))
+
+    return f(x_new)
+
 # Elbow analysis?
 do_elbow_analysis = True
 
-# Load an FSC curve
-# Load raw FSC curves as list of lists
-fsc_data = []
-with open("fsc_curves/fsc_curves_normalisedandanchored.csv", "r") as f:
-    for line in f:
-        try:
-            values = [float(x) for x in line.strip().split(",") if x]
-            if len(values) > 1:  # skip empty or invalid lines
-                fsc_data.append(values)
-        except ValueError:
-            print(f"⚠️ Skipping bad line: {line.strip()}")
+# Set seeds to ensure everything is reproducible
+set_seeds(42)
 
-# Step 1: Resample curves to same length
+fsc_df = pd.read_json('fsc_curves/fsc_curves_all.json')
+fsc_df["fsc_unmasked"] = fsc_df["fsc_unmasked"].apply(np.asarray)
+fsc_df["fsc_masked"] = fsc_df["fsc_masked"].apply(np.asarray)
+fsc_df["fsc_corrected"] = fsc_df["fsc_corrected"].apply(np.asarray)
+fsc_df["fsc_phaserandom"] = fsc_df["fsc_phaserandom"].apply(np.asarray)
 
-def resample_curve(curve, length=100):
-    if len(curve) < 2:
-        return np.full(length, np.nan)
-    x_old = np.linspace(0, 1, len(curve))
-    x_new = np.linspace(0, 1, length)
-    # Crucially, change fill_value to 'nan' to avoid bad extrapolation
-    f = interp1d(x_old, curve, kind='linear', fill_value='nan', bounds_error=False)
-    return f(x_new)
+fsc_data = fsc_df['fsc_masked'].dropna()
 
-resampled_data = np.array([resample_curve(c, 100) for c in fsc_data])  # Use first 50 points
+# resampled_data = np.array([resample_curve(c, 100) for c in fsc_data])
+resampled_curves = [edit_curve_based_on_crossing(c) for c in fsc_df["fsc_unmasked"]]
+resampled_data = np.vstack(resampled_curves).astype(np.float32)
 
 # --- START: MISSING GLOBAL NORMALIZATION STEP ---
 
@@ -116,13 +182,13 @@ if do_elbow_analysis:
     elbow_analysis(refined_embeddings)
 
 n_clusters = 10
-kmeans = KMeans(n_clusters=n_clusters, n_init=20)
+kmeans = KMeans(n_clusters=n_clusters, n_init=20, random_state=42)
 labels = kmeans.fit_predict(refined_embeddings)
 
 # Optional: Visualize with UMAP
 print("Projecting with UMAP")
 from mpl_toolkits.mplot3d import Axes3D
-umap_proj = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=3).fit_transform(refined_embeddings)
+umap_proj = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=3, random_state=42).fit_transform(refined_embeddings)
 
 fig = plt.figure(figsize=(10, 8))
 ax = fig.add_subplot(111, projection='3d')
@@ -146,7 +212,6 @@ cluster_df = pd.DataFrame({
 encoder.save("encoder_model.h5")
 
 # Save KMeans model
-import joblib
 joblib.dump(kmeans, "kmeans_model.pkl")
 
 # Save cluster metadata (e.g., frequencies for slider)
@@ -187,7 +252,7 @@ plt.ylabel("FSC Value")
 plt.title("Average FSC Curves per Cluster")
 plt.legend(fontsize='small', loc='center left', bbox_to_anchor=(1, 0.5))
 plt.tight_layout()
-plt.savefig("cluster_averages.png", dpi=300)
+plt.savefig("outputs/cluster_averages_fsc_unmasked.png", dpi=300)
 plt.show()
 
 # Plot each cluster in its own subplot with average in red
@@ -215,7 +280,7 @@ for i, cluster_id in enumerate(sorted_clusters.index):
 
 plt.suptitle("FSC Curves per Cluster (grey) with Average (blue)", fontsize=16)
 plt.tight_layout(rect=[0, 0, 1, 0.96])
-plt.savefig("cluster_subplots.png", dpi=300)
+plt.savefig("outputs/cluster_subplots_fsc_unmasked.png", dpi=300)
 plt.close()
 
 # --- PREPARATORY STEP: Calculate Distances and Create a Helper DataFrame ---
@@ -292,7 +357,7 @@ cbar_ax = plt.gcf().add_axes([0.91, 0.15, 0.02, 0.7]) # [left, bottom, width, he
 cbar = plt.colorbar(sm, cax=cbar_ax)
 cbar.set_label('Euclidean Distance from Latent Space Cluster Centroid', rotation=270, labelpad=15)
 
-plt.savefig("cluster_subplots_dist_colored.png", dpi=300)
+plt.savefig("outputs/cluster_subplots_dist_colored_fsc_unmasked.png", dpi=300)
 plt.close()
 
 print('Plotting complete.')
