@@ -9,7 +9,6 @@ import os
 import random
 import tensorflow as tf
 import joblib
-from sklearn.metrics.pairwise import euclidean_distances
 
 def set_seeds(seed=42):
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -47,6 +46,8 @@ def elbow_analysis(refined_embeddings):
 
     print(f"Elbow analysis plot saved to elbow_method_analysis.png. Review plot to confirm optimal K.")
 
+
+
 def find_crossing_point(y_values, threshold=0.143):
     # Standard linear interpolation to find the fractional index
     for i in range(1, len(y_values)):
@@ -63,12 +64,9 @@ def edit_curve_based_on_crossing(y_values, target_idx=50, output_length=100):
     old_indices = np.arange(len(y_values))
 
     # 1. Create a map from the old indices to the new coordinate system
-    # We map: 0 -> 0, crossing_idx -> target_idx, max_idx -> output_length - 1
+    # map: 0 -> 0, crossing_idx -> target_idx, max_idx -> output_length - 1
     new_x_coords = np.linspace(0, output_length - 1, output_length)
-
     # Define the mapping: Original index -> Aligned index
-    # To interpolate the values, we actually need the inverse:
-    # Where does each "New Index" land in the "Old Index" space?
     crossing = find_crossing_point(y_values)
     if crossing is not None:
         old_x_mapped_to_new = [0, crossing, len(y_values) - 1]
@@ -77,11 +75,8 @@ def edit_curve_based_on_crossing(y_values, target_idx=50, output_length=100):
         # If no crossing found, do a simple resample without warping
         return resample_curve(y_values, output_length)
 
-    # This function tells us: for a given index in our 100-pt output,
-    # which index should we look up in the original data?
     mapping_func = interp1d(new_x_mapped_to_new, old_x_mapped_to_new, kind='linear')
 
-    # Find the corresponding old indices for every new index
     source_indices = mapping_func(new_x_coords)
 
     # 2. Interpolate the actual Y values at those calculated source indices
@@ -96,7 +91,7 @@ def resample_curve(curve, length=100):
     # Ensure input is a numpy array for math operations
     y = np.asarray(curve, dtype=float)
 
-    # Remove NaNs to prevent the "squashed" 0.8-1.0 effect caused by trailing NaNs
+    # Remove NaNs
     y_clean = y[~np.isnan(y)]
 
     # Safety check: need at least 2 points to interpolate
@@ -128,20 +123,18 @@ fsc_df["fsc_phaserandom"] = fsc_df["fsc_phaserandom"].apply(np.asarray)
 
 fsc_data = fsc_df['fsc_masked'].dropna()
 
-# resampled_data = np.array([resample_curve(c, 100) for c in fsc_data])
-resampled_curves = [edit_curve_based_on_crossing(c) for c in fsc_df["fsc_unmasked"]]
+resampled_curves = [edit_curve_based_on_crossing(c) for c in fsc_data]
 resampled_data = np.vstack(resampled_curves).astype(np.float32)
 
-# --- START: MISSING GLOBAL NORMALIZATION STEP ---
+# --- START: GLOBAL NORMALIZATION STEP ---
 
 # Calculate the minimum and maximum across the entire dataset
 data_min = np.min(resampled_data)
 data_max = np.max(resampled_data)
 
 # Scale all data simultaneously to the [0, 1] range
-# This is crucial because your decoder's final layer uses 'sigmoid'
 if data_max == data_min:
-    # Handle the trivial case where all data is the same
+    # Handle the case where all data is the same
     normalized_data = resampled_data
 else:
     normalized_data = (resampled_data - data_min) / (data_max - data_min)
@@ -187,7 +180,6 @@ labels = kmeans.fit_predict(refined_embeddings)
 
 # Optional: Visualize with UMAP
 print("Projecting with UMAP")
-from mpl_toolkits.mplot3d import Axes3D
 umap_proj = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=3, random_state=42).fit_transform(refined_embeddings)
 
 fig = plt.figure(figsize=(10, 8))
@@ -289,10 +281,14 @@ plt.close()
 centroids = kmeans.cluster_centers_[labels]
 
 # 2. Calculate the Euclidean distance of each embedding to its own centroid
+# This manual numpy calculation is more efficient than sklearn's euclidean_distances()
+# because it computes only per-sample distances to their assigned centroid, rather than
+# computing a full pairwise distance matrix and then extracting the diagonal.
 distances = np.sqrt(np.sum((refined_embeddings - centroids) ** 2, axis=1))
 
 # 3. Create a DataFrame to hold cluster info, curve data, and distances
 # We use this to easily retrieve the curve and its distance for plotting
+
 distance_df = pd.DataFrame({
     'cluster': labels,
     'curve': list(resampled_data),  # Use the normalized/resampled curve data
