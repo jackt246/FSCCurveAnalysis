@@ -18,8 +18,8 @@ def set_seeds(seed=42):
     # For newer TensorFlow/Keras versions
     tf.keras.utils.set_random_seed(seed)
 
-def elbow_analysis(refined_embeddings):
-    print("Performing Elbow Analysis to find optimal number of clusters (K)")
+def elbow_analysis(refined_embeddings, curve_type='fsc_masked'):
+    print(f"Performing Elbow Analysis to find optimal number of clusters (K) for {curve_type}")
     # Define the range of K values to test (e.g., from 1 to 30)
     max_k = 30
     inertia = []
@@ -33,18 +33,18 @@ def elbow_analysis(refined_embeddings):
     # Plotting the Elbow Curve
     plt.figure(figsize=(10, 6))
     plt.plot(range(1, max_k + 1), inertia, marker='o')
-    plt.title('Elbow Method: Inertia vs. Number of Clusters (K)')
+    plt.title(f'Elbow Method: Inertia vs. Number of Clusters (K) - {curve_type}')
     plt.xlabel('Number of Clusters (K)')
     plt.ylabel('Inertia (Within-Cluster Sum of Squares)')
     plt.grid(True)
     plt.xticks(np.arange(1, max_k + 1, 2))
     plt.axvline(x=10, color='r', linestyle='--', label=f'Chosen K={10}')  # Show current choice
     plt.legend()
-    plt.savefig("elbow_method_analysis.png", dpi=300)
+    plt.savefig(f"elbow_method_analysis_{curve_type}.png", dpi=300)
     plt.show()
     plt.close()
 
-    print(f"Elbow analysis plot saved to elbow_method_analysis.png. Review plot to confirm optimal K.")
+    print(f"Elbow analysis plot saved to elbow_method_analysis_{curve_type}.png. Review plot to confirm optimal K.")
 
 
 
@@ -112,6 +112,10 @@ def resample_curve(curve, length=100):
 # Elbow analysis?
 do_elbow_analysis = True
 
+# SELECT WHICH FSC CURVE TYPE TO CLUSTER
+# Options: 'fsc_unmasked', 'fsc_masked', 'fsc_corrected', 'fsc_phaserandom'
+fsc_curve_type = 'fsc_masked'
+
 # Set seeds to ensure everything is reproducible
 set_seeds(42)
 
@@ -121,7 +125,8 @@ fsc_df["fsc_masked"] = fsc_df["fsc_masked"].apply(np.asarray)
 fsc_df["fsc_corrected"] = fsc_df["fsc_corrected"].apply(np.asarray)
 fsc_df["fsc_phaserandom"] = fsc_df["fsc_phaserandom"].apply(np.asarray)
 
-fsc_data = fsc_df['fsc_masked'].dropna()
+# Load the selected FSC curve type
+fsc_data = fsc_df[fsc_curve_type].dropna()
 
 resampled_curves = [edit_curve_based_on_crossing(c) for c in fsc_data]
 resampled_data = np.vstack(resampled_curves).astype(np.float32)
@@ -172,7 +177,7 @@ print("Generating embeddings and clustering with KMeans")
 refined_embeddings = encoder.predict(resampled_data)
 
 if do_elbow_analysis:
-    elbow_analysis(refined_embeddings)
+    elbow_analysis(refined_embeddings, curve_type=fsc_curve_type)
 
 n_clusters = 10
 kmeans = KMeans(n_clusters=n_clusters, n_init=20, random_state=42)
@@ -201,14 +206,14 @@ cluster_df = pd.DataFrame({
 })
 
 # Save encoder model
-encoder.save("encoder_model.h5")
+encoder.save(f"encoder_model_{fsc_curve_type}.h5")
 
 # Save KMeans model
-joblib.dump(kmeans, "kmeans_model.pkl")
+joblib.dump(kmeans, f"kmeans_model_{fsc_curve_type}.pkl")
 
 # Save cluster metadata (e.g., frequencies for slider)
 cluster_counts = cluster_df['cluster'].value_counts().sort_index()
-cluster_counts.to_csv("cluster_frequencies.csv", header=["count"])
+cluster_counts.to_csv(f"cluster_frequencies_{fsc_curve_type}.csv", header=["count"])
 print("Models and cluster info saved.")
 
 
@@ -231,7 +236,7 @@ for cluster_id in cluster_counts.index:
 # Save all to one CSV file
 columns = ['cluster_id', 'typicality'] + [f'fsc_{i}' for i in range(resampled_data.shape[1])]
 df_out = pd.DataFrame(output_rows, columns=columns)
-df_out.to_csv("cluster_summary.csv", index=False)
+df_out.to_csv(f"cluster_summary_{fsc_curve_type}.csv", index=False)
 
 # Plot average curves for each cluster
 plt.figure(figsize=(12, 8))
@@ -241,10 +246,10 @@ for row in output_rows:
     plt.plot(avg_curve, label=label, alpha=0.7)
 plt.xlabel("Normalized Frequency")
 plt.ylabel("FSC Value")
-plt.title("Average FSC Curves per Cluster")
+plt.title(f"Average FSC Curves per Cluster - {fsc_curve_type}")
 plt.legend(fontsize='small', loc='center left', bbox_to_anchor=(1, 0.5))
 plt.tight_layout()
-plt.savefig("outputs/cluster_averages_fsc_unmasked.png", dpi=300)
+plt.savefig(f"outputs/cluster_averages_{fsc_curve_type}.png", dpi=300)
 plt.show()
 
 # Plot each cluster in its own subplot with average in red
@@ -270,9 +275,9 @@ for i, cluster_id in enumerate(sorted_clusters.index):
     plt.xticks([])
     plt.yticks([])
 
-plt.suptitle("FSC Curves per Cluster (grey) with Average (blue)", fontsize=16)
+plt.suptitle(f"FSC Curves per Cluster (grey) with Average (blue) - {fsc_curve_type}", fontsize=16)
 plt.tight_layout(rect=[0, 0, 1, 0.96])
-plt.savefig("outputs/cluster_subplots_fsc_unmasked.png", dpi=300)
+plt.savefig(f"outputs/cluster_subplots_{fsc_curve_type}.png", dpi=300)
 plt.close()
 
 # --- PREPARATORY STEP: Calculate Distances and Create a Helper DataFrame ---
@@ -345,7 +350,7 @@ for i, cluster_id in enumerate(sorted_clusters.index):
 sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=0, vmax=max_global_distance))
 sm.set_array([])
 
-plt.suptitle("FSC Curves per Cluster (All curves rescaled so that y = 0.143 is the centre x-value) (Average curve shown in black)", fontsize=16)
+plt.suptitle(f"FSC Curves per Cluster (All curves rescaled so that y = 0.143 is the centre x-value) (Average curve shown in black) - {fsc_curve_type}", fontsize=16)
 plt.tight_layout(rect=[0, 0, 0.90, 0.96])
 
 # Add the colorbar to the figure
@@ -353,7 +358,7 @@ cbar_ax = plt.gcf().add_axes([0.91, 0.15, 0.02, 0.7]) # [left, bottom, width, he
 cbar = plt.colorbar(sm, cax=cbar_ax)
 cbar.set_label('Euclidean Distance from Latent Space Cluster Centroid', rotation=270, labelpad=15)
 
-plt.savefig("outputs/cluster_subplots_dist_colored_fsc_unmasked.png", dpi=300)
+plt.savefig(f"outputs/cluster_subplots_dist_colored_{fsc_curve_type}.png", dpi=300)
 plt.close()
 
 print('Plotting complete.')
