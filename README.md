@@ -46,7 +46,19 @@ FSCCurveAnalysis/
 ├── models/                # Trained model artefacts loaded by the CLIs
 ├── outputs/               # Generated plots and derived arrays
 ├── docs/                  # Typicality workflow reference material
-└── tests/                 # Supporting test and inspection scripts
+└── tests/                 # Unit tests (pytest)
+```
+
+## Running the tests
+
+Unit tests cover the pure preprocessing and classification helpers
+(`resample_curve`, `find_crossing_point`, `anchor_curve`, `classify_fsc_curve`,
+`fetch_fsc_curve`, `draw_typicality_bar`, and `is_valid_number_array`). Model
+loading and HTTP access are mocked, so the suite runs without TensorFlow,
+network access, or trained artefacts.
+
+```bash
+uv run --group dev pytest
 ```
 
 ## CLI usage

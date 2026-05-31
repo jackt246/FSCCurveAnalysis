@@ -3,8 +3,6 @@ import os
 
 import numpy as np
 import pandas as pd
-from emdb.client import EMDB
-from tqdm import tqdm
 
 
 def is_valid_number_array(arr) -> bool:
@@ -19,6 +17,9 @@ def is_valid_number_array(arr) -> bool:
 
 
 def main() -> None:
+    from emdb.client import EMDB
+    from tqdm import tqdm
+
     client = EMDB()
 
     results = client.csv_search(
