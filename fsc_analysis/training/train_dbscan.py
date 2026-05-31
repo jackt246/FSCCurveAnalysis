@@ -10,6 +10,8 @@ from scipy.interpolate import interp1d
 from sklearn.cluster import DBSCAN
 from tensorflow.keras import layers, models
 
+from fsc_analysis.utils import set_seeds
+
 
 def resample_curve(curve, length=100):
     if len(curve) < 2:
@@ -21,6 +23,7 @@ def resample_curve(curve, length=100):
 
 
 def main() -> None:
+    set_seeds(42)
     fsc_data = []
     with open('data/fsc_curves_normalisedandanchored.csv', 'r') as f:
         for line in f:
@@ -69,7 +72,7 @@ def main() -> None:
     labels = dbscan.fit_predict(refined_embeddings)
 
     print('Projecting with UMAP')
-    umap_proj = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=3).fit_transform(refined_embeddings)
+    umap_proj = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=3, random_state=42).fit_transform(refined_embeddings)
 
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')

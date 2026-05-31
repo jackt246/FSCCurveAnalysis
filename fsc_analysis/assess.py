@@ -28,12 +28,12 @@ def main() -> None:
 
     models = load_models()
     processed = anchor_curve(np.array(fsc_curve))
-    cluster_id, freq, perc = classify_fsc_curve(processed, models)
+    cluster_id, distance, typicality = classify_fsc_curve(processed, models)
 
     print(f"Cluster ID: {cluster_id}")
-    print(f"Frequency: {freq} curves")
-    print(f"Typicality Percentile: {perc * 100:.2f}%")
-    draw_typicality_bar(perc)
+    print(f"Distance from centroid: {distance:.4f}")
+    print(f"Typicality: {typicality * 100:.2f}%")
+    draw_typicality_bar(typicality)
 
 
 if __name__ == "__main__":

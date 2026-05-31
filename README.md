@@ -69,7 +69,7 @@ uv run --group dev pytest
 uv run fsc-assess EMD-14046
 ```
 
-This fetches the FSC curve from EMDB, anchors it to the 0.143 crossing, encodes it with the trained model, and reports the assigned cluster and percentile-based typicality.
+This fetches the FSC curve from EMDB, anchors it to the 0.143 crossing, normalises it with the trained scaling parameters, encodes it, and reports the assigned cluster, the distance from that cluster's centroid, and a 0–1 centroid-distance typicality score.
 
 ### Assess a batch of entries
 
@@ -147,8 +147,9 @@ This is the end-to-end workflow for showing how different FSC curve types cluste
 
    - `encoder_model_<type>.h5`
    - `kmeans_model_<type>.pkl`
+   - `normalisation_<type>.json` — global min/max for inference normalisation
+   - `cluster_distance_stats_<type>.csv` — per-cluster distance stats and typicality thresholds
    - `cluster_frequencies_<type>.csv`
-   - `cluster_summary_<type>.csv`
 
 ### Other training and analysis scripts
 
@@ -165,14 +166,16 @@ Supporting workflow notes are in `docs/CONFIGURATION_TEMPLATE.md` and `docs/TYPI
 
 ## Model artefacts
 
-The runtime CLI tools (`fsc-assess`, `fsc-batch`, `fsc-batch-anchored`) load trained
-artefacts from `models/`:
+The runtime CLI tools (`fsc-assess`, `fsc-batch`, `fsc-batch-anchored`) load the
+curve-type-suffixed artefacts written by training directly from `models/`
+(default curve type `fsc_masked`):
 
-- `encoder_model.h5`
-- `kmeans_model.pkl`
-- `cluster_frequencies.csv`
-- `cluster_summary.csv`
+- `encoder_model_<type>.h5`
+- `kmeans_model_<type>.pkl`
+- `normalisation_<type>.json`
+- `cluster_distance_stats_<type>.csv`
 
-Training (`train_kmeans`) writes curve-type-suffixed artefacts (e.g.
-`encoder_model_fsc_masked.h5`) into `models/`. To use a freshly trained model with
-the assessment CLIs, copy or rename the suffixed files to the unsuffixed names above.
+The experiment scripts (`typicality`, `inspect_clusters`) and the user-facing
+CLIs read these same artefacts, so they apply identical normalisation and
+typicality thresholds. No copying or renaming step is required: train, then
+assess against the same `models/` directory.

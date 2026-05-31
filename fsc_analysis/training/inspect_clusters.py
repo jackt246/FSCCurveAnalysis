@@ -1,21 +1,24 @@
 """Inspect cluster distance distributions for typicality threshold selection."""
 
-import joblib
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from tensorflow.keras.models import load_model
 
 from fsc_analysis.training.train_kmeans import edit_curve_based_on_crossing
+from fsc_analysis.utils import load_models, normalize_curve
 
 fsc_curve_type = 'fsc_masked'
+
+_MODEL_DIR = Path(__file__).resolve().parent.parent.parent / "models"
+_OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "outputs"
 
 
 def main() -> None:
     print(f'Loading models for {fsc_curve_type}...')
-    encoder = load_model(f'encoder_model_{fsc_curve_type}.h5')
-    kmeans = joblib.load(f'kmeans_model_{fsc_curve_type}.pkl')
-    cluster_summary = pd.read_csv(f'cluster_summary_{fsc_curve_type}.csv')
+    models = load_models(curve_type=fsc_curve_type)
+    cluster_summary = pd.read_csv(_MODEL_DIR / f'cluster_frequencies_{fsc_curve_type}.csv')
 
     cluster_data = pd.read_json('data/fsc_curves_all.json')
     cluster_data[fsc_curve_type] = cluster_data[fsc_curve_type].apply(np.asarray)
@@ -24,14 +27,12 @@ def main() -> None:
     resampled_curves = [edit_curve_based_on_crossing(c) for c in fsc_data]
     resampled_data = np.vstack(resampled_curves).astype(np.float32)
 
-    data_min = np.min(resampled_data)
-    data_max = np.max(resampled_data)
-    normalized_data = (resampled_data - data_min) / (data_max - data_min)
+    normalized_data = normalize_curve(resampled_data, models.data_min, models.data_max)
 
-    refined_embeddings = encoder.predict(normalized_data)
-    labels = kmeans.predict(refined_embeddings)
+    refined_embeddings = models.encoder.predict(normalized_data)
+    labels = models.kmeans.predict(refined_embeddings)
 
-    centroids = kmeans.cluster_centers_[labels]
+    centroids = models.kmeans.cluster_centers_[labels]
     distances = np.sqrt(np.sum((refined_embeddings - centroids) ** 2, axis=1))
 
     analysis_df = pd.DataFrame({
@@ -113,13 +114,16 @@ def main() -> None:
 
     plt.suptitle(f'Distance Distributions per Cluster - {fsc_curve_type}', fontsize=16, y=1.00)
     plt.tight_layout()
-    plt.savefig(f'cluster_distance_distributions_{fsc_curve_type}.png', dpi=300, bbox_inches='tight')
-    print(f'✓ Saved: cluster_distance_distributions_{fsc_curve_type}.png')
+    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    dist_plot_path = _OUTPUT_DIR / f'cluster_distance_distributions_{fsc_curve_type}.png'
+    plt.savefig(dist_plot_path, dpi=300, bbox_inches='tight')
+    print(f'✓ Saved: {dist_plot_path}')
     plt.close()
 
     stats_df = pd.DataFrame(cluster_stats).T
-    stats_df.to_csv(f'cluster_statistics_{fsc_curve_type}.csv')
-    print(f'✓ Saved: cluster_statistics_{fsc_curve_type}.csv')
+    stats_csv_path = _OUTPUT_DIR / f'cluster_statistics_{fsc_curve_type}.csv'
+    stats_df.to_csv(stats_csv_path)
+    print(f'✓ Saved: {stats_csv_path}')
 
     print(f"\n{'=' * 70}")
     print('NEXT STEPS:')

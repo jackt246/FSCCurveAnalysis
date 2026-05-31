@@ -10,6 +10,8 @@ from scipy.interpolate import interp1d
 from sklearn.cluster import KMeans
 from tensorflow.keras import layers, models
 
+from fsc_analysis.utils import set_seeds
+
 
 def resample_curve(curve, length=100):
     if len(curve) < 2:
@@ -33,6 +35,7 @@ def create_cnn_encoder(input_shape=(100, 1), latent_dim=32):
 
 
 def main() -> None:
+    set_seeds(42)
     fsc_data = []
     with open("data/fsc_curves_normalisedandanchored.csv") as f:
         for line in f:
@@ -54,10 +57,10 @@ def main() -> None:
     embeddings = encoder.predict(resampled_data_expanded, batch_size=32)
 
     n_clusters = 100
-    kmeans = KMeans(n_clusters=n_clusters, random_state=0)
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
     cluster_assignments = kmeans.fit_predict(embeddings)
 
-    reducer = umap.UMAP()
+    reducer = umap.UMAP(random_state=42)
     umap_embeddings = reducer.fit_transform(embeddings)
     plt.figure(figsize=(10, 6))
     plt.scatter(umap_embeddings[:, 0], umap_embeddings[:, 1], c=cluster_assignments, cmap="tab10", s=10)

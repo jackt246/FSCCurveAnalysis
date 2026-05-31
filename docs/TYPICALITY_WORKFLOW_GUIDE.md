@@ -2,265 +2,123 @@
 
 ## Overview
 
-This workflow helps you define what makes an FSC curve "typical" vs "atypical", then converts those definitions into quantitative typicality scores (0-1) that you can use for further analysis.
+This workflow turns a corpus of FSC curves into a single, quantitative
+**typicality score (0–1)** for any curve. The score is defined consistently for
+both the population experiment and the single-curve user tool, so the numbers
+mean the same thing in both places.
 
-## The Three-Step Process
+## How typicality is defined
 
-### Step 1: Cluster Inspection & Definition
-**File:** `ClusterInspection_TypeicalityDefinition.py`
+Typicality is the distance from a curve's assigned cluster centroid in the
+encoder's latent space, scaled by that cluster's distance threshold:
 
-This script analyzes your clusters and helps you understand their characteristics:
+```
+typicality = clip(1 - distance / threshold, 0, 1)
+```
+
+- **1.0** — the curve sits exactly on its cluster centroid (most typical).
+- **0.5** — the curve is halfway to the cluster's atypicality threshold.
+- **0.0** — the curve is at or beyond the threshold (atypical / outlier).
+
+The per-cluster `threshold` is `mean + 1.5*std` of the training curves'
+distances within that cluster. Thresholds are computed once at training time and
+persisted, so no manual cluster labelling is required and the definition is
+identical everywhere.
+
+All randomness is seeded (`set_seeds(42)`), so retraining on the same data
+reproduces the same clusters, thresholds, and scores.
+
+## Artefacts produced by training
+
+`train_kmeans` writes the following into `models/` (suffixed by curve type, e.g.
+`fsc_masked`):
+
+| File | Purpose |
+| --- | --- |
+| `encoder_model_{type}.h5` | Trained autoencoder encoder |
+| `kmeans_model_{type}.pkl` | Fitted KMeans model (centroids) |
+| `normalisation_{type}.json` | Global `data_min`/`data_max` for inference normalisation |
+| `cluster_distance_stats_{type}.csv` | Per-cluster distance stats + typicality `threshold` |
+| `cluster_frequencies_{type}.csv` | Curve counts per cluster |
+
+These five artefacts are everything the experiment scripts and the `fsc-assess`
+tool need; both read the **same** normalisation parameters and thresholds.
+
+## Step 1 — Train the models
 
 ```bash
-cd clustering
-python ClusterInspection_TypeicalityDefinition.py
+uv run python -m fsc_analysis.training.train_kmeans
 ```
 
-**What it produces:**
-- `cluster_distance_distributions_{fsc_curve_type}.png` - Histograms of distance distributions per cluster
-- `cluster_statistics_{fsc_curve_type}.csv` - Statistical summaries of each cluster
+Run from the repository root (the script reads `data/` and writes to `models/`
+and `outputs/`). The curve type is set by the `fsc_curve_type` variable at the
+top of the script (default `fsc_masked`).
 
-**What you do:**
-1. Run the inspection script
-2. Look at the output visualizations
-3. Look at your existing `cluster_subplots_{fsc_curve_type}.png` plots
-4. Decide for each cluster: "Is this a good/typical FSC curve cluster?"
-
-**Output to inspect:**
-- `cluster_distance_distributions_{fsc_curve_type}.png` shows where each cluster's curves fall
-- `cluster_statistics_{fsc_curve_type}.csv` shows suggested thresholds
-
----
-
-### Step 2: Define Your Classes
-**File:** `CalculateTypicalityScores.py` (top of file)
-
-Based on your visual inspection, edit these two dictionaries:
-
-#### Dictionary 1: Classify your clusters
-
-```python
-# Edit these based on visual inspection
-TYPICAL_CLUSTERS = [0, 3, 5]        # Clusters with "good" FSC curves
-ATYPICAL_CLUSTERS = [1, 2, 9]       # Clusters with "bad/noisy" FSC curves
-```
-
-**How to decide:**
-- Look at `cluster_subplots_{fsc_curve_type}.png`
-- Do the curves in this cluster look like good quality FSC curves?
-- Are they smooth? Do they follow expected patterns?
-- Mark the good ones as TYPICAL, bad ones as ATYPICAL
-
-#### Dictionary 2: Set distance thresholds for typical clusters
-
-```python
-CLASS_THRESHOLDS = {
-    0: 0.45,    # Cluster 0: curves within distance 0.45 are "typical"
-    3: 0.38,    # Cluster 3: curves within distance 0.38 are "typical"
-    5: 0.52,    # Cluster 5: curves within distance 0.52 are "typical"
-}
-```
-
-**How to choose thresholds:**
-- Use the "Suggested Threshold" from `cluster_statistics_{fsc_curve_type}.csv`
-- Or use the percentile breakpoints from the histograms
-- You can always adjust these later if needed
-- The value represents: "Curves beyond this distance are outliers in this cluster"
-
----
-
-### Step 3: Calculate Typicality Scores
-**File:** `CalculateTypicalityScores.py`
-
-Once you've defined your classes and thresholds, run:
+## Step 2 — (Optional) Inspect cluster distances
 
 ```bash
-python CalculateTypicalityScores.py
+uv run python -m fsc_analysis.training.inspect_clusters
 ```
 
-**What it produces:**
+Loads the trained models from `models/`, reuses the persisted normalisation, and
+writes diagnostics to `outputs/`:
 
-1. **CSV File:**
-   - `typicality_scores_{fsc_curve_type}.csv`
-   - Contains: cluster, distance, typicality_score, typicality_class, curve
+- `cluster_distance_distributions_{type}.png` — distance histograms per cluster
+- `cluster_statistics_{type}.csv` — per-cluster distance statistics
 
-2. **Visualizations:**
-   - `typicality_distribution_{fsc_curve_type}.png` - Violin & histogram plots
-   - `typicality_vs_distance_{fsc_curve_type}.png` - Scatter plot showing relationships
-   - `typicality_by_cluster_{fsc_curve_type}.png` - Stacked bar chart per cluster
+Use these to sanity-check that clusters are coherent and thresholds look sensible.
 
-3. **Console output:**
-   - Summary statistics
-   - Per-cluster breakdown
-   - Counts by typicality class
+## Step 3 — Score the population
 
----
-
-## Understanding the Typicality Score
-
-### The Scoring System
-
-**For curves in TYPICAL clusters:**
-```
-If distance ≤ threshold:
-    typicality_score = 1.0 - (distance / threshold)
-    class = "Typical"
-    
-If distance > threshold:
-    typicality_score = 0.0
-    class = "Atypical_Outlier"
-```
-
-**For curves in ATYPICAL clusters:**
-```
-typicality_score = 0.0
-class = "Atypical"
-```
-
-**For curves in unclassified clusters:**
-```
-typicality_score = 0.5
-class = "Mixed"
-```
-
-### What the Score Means
-
-- **1.0**: At the cluster centroid (perfect representative)
-- **0.8**: 80% of the way from centroid to threshold
-- **0.5**: Halfway to threshold / or unclassified cluster
-- **0.0**: Beyond threshold or in an atypical cluster / outlier
-
----
-
-## Practical Example
-
-Let's say you have this setup:
-
-```python
-TYPICAL_CLUSTERS = [0, 3]
-ATYPICAL_CLUSTERS = [1, 2]
-CLASS_THRESHOLDS = {0: 0.5, 3: 0.4}
-```
-
-**Example curves:**
-
-| Curve | Cluster | Distance | Threshold | Typicality Score | Class |
-|-------|---------|----------|-----------|------------------|-------|
-| A     | 0       | 0.2      | 0.5       | 0.6              | Typical |
-| B     | 0       | 0.6      | 0.5       | 0.0              | Atypical_Outlier |
-| C     | 3       | 0.1      | 0.4       | 0.75             | Typical |
-| D     | 1       | 0.3      | —         | 0.0              | Atypical |
-| E     | 4       | 0.2      | —         | 0.5              | Mixed |
-
----
-
-## Workflow Example
-
-### Run 1: Inspect clusters
 ```bash
-python ClusterInspection_TypeicalityDefinition.py
-# Output: cluster_distance_distributions_fsc_masked.png
-#         cluster_statistics_fsc_masked.csv
+uv run python -m fsc_analysis.training.typicality
 ```
 
-### Review
-- Open `cluster_distance_distributions_fsc_masked.png`
-- Look at each histogram
-- Note which clusters look "good" and which look "bad"
-- Check the suggested thresholds
+Loads the trained models, applies the unified centroid-distance definition to
+every curve, and writes to `outputs/`:
 
-### Run 2: Define classes and calculate scores
+- `typicality_scores_{type}.csv` — per-curve cluster, distance, threshold, score, class
+- `typicality_distribution_{type}.png` — score distributions (per cluster + overall)
+- `typicality_vs_distance_{type}.png` — score vs. centroid distance
+- `typicality_by_cluster_{type}.png` — Typical/Atypical breakdown per cluster
+
+A curve is labelled **Typical** when `distance <= threshold` and **Atypical**
+otherwise.
+
+## Step 4 — Assess a user's own curve
+
+The single-curve tool uses the identical definition and the same persisted
+artefacts:
+
 ```bash
-# Edit CalculateTypicalityScores.py:
-# - Set TYPICAL_CLUSTERS = [0, 3, 5]
-# - Set ATYPICAL_CLUSTERS = [1, 9]
-# - Set CLASS_THRESHOLDS from inspection
-
-python CalculateTypicalityScores.py
-# Output: typicality_scores_fsc_masked.csv
-#         typicality_distribution_fsc_masked.png
-#         typicality_vs_distance_fsc_masked.png
-#         typicality_by_cluster_fsc_masked.png
+uv run fsc-assess EMD-1234
 ```
 
-### Review Results
-- Look at the new visualizations
-- Do the typicality assignments match your intuition?
-- Are "good looking" curves getting high scores?
-- Are "bad looking" curves getting low scores?
+It fetches the curve, anchors it, normalises it with the saved
+`data_min`/`data_max`, encodes it, finds its nearest cluster centroid, and
+reports the centroid distance and the 0–1 typicality score.
 
-### Refine if needed
-- If thresholds are too strict/lenient, adjust and re-run
-- If cluster classifications are wrong, adjust and re-run
+For batches:
 
----
-
-## Converting to Binary Classification (Optional)
-
-If you want binary Typical/Atypical labels:
-
-```python
-# In your analysis code:
-df['is_typical'] = df['typicality_score'] > 0.5  # Simple threshold
-
-# Or more sophisticated:
-df['is_typical'] = (df['typicality_class'] == 'Typical')  # Only perfect class
-```
-
----
-
-## Tips & Tricks
-
-### Choosing Good Thresholds
-1. **Data-driven:** Use the "Suggested Threshold" as a baseline
-2. **Visual:** Look at the histogram and pick where the distribution drops off
-3. **Percentile-based:** Use 75th or 85th percentile instead of mean+std
-4. **Conservative:** Start strict and loosen if you're excluding too much
-5. **Domain knowledge:** Do the thresholds make sense for your application?
-
-### Debugging Poor Classifications
-If results don't match your visual inspection:
-- Check that you classified the right clusters as TYPICAL/ATYPICAL
-- Check that thresholds are reasonable (not too small/large)
-- Look at `typicality_vs_distance_{fsc_curve_type}.png` for patterns
-- Manually inspect curves at boundary scores
-
-### Multiple FSC Curve Types
-Repeat the entire workflow for each curve type:
 ```bash
-# For fsc_masked:
-python ClusterInspection_TypeicalityDefinition.py
-# Edit CalculateTypicalityScores.py: fsc_curve_type = 'fsc_masked'
-python CalculateTypicalityScores.py
-
-# For fsc_unmasked:
-# Edit both files: fsc_curve_type = 'fsc_unmasked'
-# Repeat steps...
+uv run fsc-batch
+uv run fsc-batch-anchored
 ```
 
----
+## Comparing curve types for a paper
 
-## Files Summary
+To compare how different FSC curve types cluster, retrain per type by setting
+`fsc_curve_type` (e.g. `fsc_masked`, `fsc_unmasked`, `fsc_phaserandom`) at the
+top of `train_kmeans.py`, then re-run Steps 1–3. Each type produces its own
+suffixed artefacts and figures, which you can place side by side.
 
-| File | Purpose | When to use |
-|------|---------|------------|
-| `ClusterInspection_TypeicalityDefinition.py` | Analyze clusters and understand distances | Before defining classes |
-| `CalculateTypicalityScores.py` | Calculate typicality scores | After defining classes |
-| `cluster_distance_distributions_{type}.png` | Visualize distance distributions | Understanding cluster cohesion |
-| `cluster_statistics_{type}.csv` | Statistical summary per cluster | Reference for thresholds |
-| `typicality_scores_{type}.csv` | Main output with scores for each curve | Further analysis/filtering |
-| `typicality_distribution_{type}.png` | Overall typicality score distribution | Quality control checks |
-| `typicality_vs_distance_{type}.png` | Relationship between distance and score | Validation |
-| `typicality_by_cluster_{type}.png` | Class distribution per cluster | Sanity checks |
+## File reference
 
----
-
-## Next Steps
-
-Once you have typicality scores, you can:
-1. **Filter data:** Keep only "Typical" curves for downstream analysis
-2. **Rank structures:** Score EMDB entries by their best FSC curve's typicality
-3. **Quality metrics:** Track typicality as a quality metric over time
-4. **Outlier detection:** Investigate why certain curves are atypical
-5. **Predictions:** Train models to predict typicality on new curves
-
+| File | Role | When to run |
+| --- | --- | --- |
+| `fsc_analysis/training/train_kmeans.py` | Train encoder + KMeans, persist artefacts | First |
+| `fsc_analysis/training/inspect_clusters.py` | Inspect cluster distance distributions | Optional, after training |
+| `fsc_analysis/training/typicality.py` | Score the whole population | After training |
+| `fsc_analysis/assess.py` (`fsc-assess`) | Score a single user curve | Any time after training |
+| `models/cluster_distance_stats_{type}.csv` | Per-cluster thresholds | Reference |
+| `outputs/typicality_scores_{type}.csv` | Per-curve scores | Output |

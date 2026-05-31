@@ -9,6 +9,8 @@ import umap
 from scipy.interpolate import interp1d
 from tensorflow.keras import layers, models
 
+from fsc_analysis.utils import set_seeds
+
 
 def resample_curve(curve, length=100):
     if len(curve) < 2:
@@ -20,6 +22,7 @@ def resample_curve(curve, length=100):
 
 
 def main() -> None:
+    set_seeds(42)
     fsc_data = []
     with open('data/fsc_curves_normalisedandanchored.csv', 'r') as f:
         for line in f:
@@ -59,7 +62,7 @@ def main() -> None:
 
     n_clusters = 150
     cntr, u, _, _, _, _, _ = fuzz.cluster.cmeans(
-        embeddings, c=n_clusters, m=2.0, error=1e-5, maxiter=1000, init=None
+        embeddings, c=n_clusters, m=2.0, error=1e-5, maxiter=1000, init=None, seed=42
     )
     u = u.T
     labels = np.argmax(u, axis=1)
@@ -68,7 +71,7 @@ def main() -> None:
     np.save('fuzzy_centers.npy', cntr)
 
     print('Projecting with UMAP')
-    umap_proj = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=3).fit_transform(embeddings.T)
+    umap_proj = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=3, random_state=42).fit_transform(embeddings.T)
 
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')

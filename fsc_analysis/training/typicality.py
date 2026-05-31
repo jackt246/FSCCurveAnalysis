@@ -1,28 +1,34 @@
-"""Calculate typicality scores from trained clustering outputs."""
+"""Calculate typicality scores from trained clustering outputs.
 
-import joblib
+Typicality is defined on a single, shared scale: the Euclidean distance from a
+curve's assigned cluster centroid in latent space, scaled by that cluster's
+persisted distance threshold (``mean + 1.5*std``):
+
+    typicality = clip(1 - distance / threshold, 0, 1)
+
+A score of 1.0 means the curve sits on its cluster centroid; 0.0 means it lies
+at or beyond the atypicality threshold. This is the identical definition used by
+the single-curve ``fsc-assess`` tool, so the experiment and the user-facing tool
+report typicality the same way.
+"""
+
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from tensorflow.keras.models import load_model
 
 from fsc_analysis.training.train_kmeans import edit_curve_based_on_crossing
+from fsc_analysis.utils import load_models, normalize_curve
 
 fsc_curve_type = 'fsc_masked'
 
-TYPICAL_CLUSTERS = [0, 3, 5]
-ATYPICAL_CLUSTERS = [1, 2, 9]
-CLASS_THRESHOLDS = {
-    0: 0.45,
-    3: 0.38,
-    5: 0.52,
-}
+_OUTPUT_DIR = Path(__file__).resolve().parent.parent.parent / "outputs"
 
 
 def main() -> None:
     print(f'Loading models for {fsc_curve_type}...')
-    encoder = load_model(f'encoder_model_{fsc_curve_type}.h5')
-    kmeans = joblib.load(f'kmeans_model_{fsc_curve_type}.pkl')
+    models = load_models(curve_type=fsc_curve_type)
 
     cluster_data = pd.read_json('data/fsc_curves_all.json')
     cluster_data[fsc_curve_type] = cluster_data[fsc_curve_type].apply(np.asarray)
@@ -31,48 +37,39 @@ def main() -> None:
     resampled_curves = [edit_curve_based_on_crossing(c) for c in fsc_data]
     resampled_data = np.vstack(resampled_curves).astype(np.float32)
 
-    data_min = np.min(resampled_data)
-    data_max = np.max(resampled_data)
-    normalized_data = (resampled_data - data_min) / (data_max - data_min)
+    normalized_data = normalize_curve(resampled_data, models.data_min, models.data_max)
 
-    refined_embeddings = encoder.predict(normalized_data)
-    labels = kmeans.predict(refined_embeddings)
-    centroids = kmeans.cluster_centers_[labels]
+    refined_embeddings = models.encoder.predict(normalized_data)
+    labels = models.kmeans.predict(refined_embeddings)
+    centroids = models.kmeans.cluster_centers_[labels]
     distances = np.sqrt(np.sum((refined_embeddings - centroids) ** 2, axis=1))
 
     print(f"\n{'=' * 70}")
     print(f'CALCULATING TYPICALITY SCORES - {fsc_curve_type}')
     print(f"{'=' * 70}\n")
 
-    typicality_scores = np.zeros(len(labels))
-    typicality_class = [''] * len(labels)
+    thresholds = np.array(
+        [float(models.cluster_thresholds.get(int(c), np.nan)) for c in labels]
+    )
+    with np.errstate(divide='ignore', invalid='ignore'):
+        typicality_scores = np.clip(1.0 - distances / thresholds, 0.0, 1.0)
+    typicality_scores = np.where(np.isfinite(thresholds), typicality_scores, 0.0)
+    typicality_class = np.where(distances <= thresholds, 'Typical', 'Atypical')
 
-    for i, (cluster_id, distance) in enumerate(zip(labels, distances)):
-        if cluster_id in TYPICAL_CLUSTERS:
-            threshold = CLASS_THRESHOLDS.get(cluster_id, np.inf)
-            if distance <= threshold:
-                typicality_scores[i] = 1.0 - (distance / threshold)
-                typicality_class[i] = 'Typical'
-            else:
-                typicality_scores[i] = 0.0
-                typicality_class[i] = 'Atypical_Outlier'
-        elif cluster_id in ATYPICAL_CLUSTERS:
-            typicality_scores[i] = 0.0
-            typicality_class[i] = 'Atypical'
-        else:
-            typicality_scores[i] = 0.5
-            typicality_class[i] = 'Mixed'
+    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     results_df = pd.DataFrame({
         'cluster': labels,
         'distance': distances,
+        'threshold': thresholds,
         'typicality_score': typicality_scores,
         'typicality_class': typicality_class,
         'curve': list(normalized_data),
     })
 
-    results_df.to_csv(f'typicality_scores_{fsc_curve_type}.csv', index=False)
-    print(f'✓ Saved typicality scores to: typicality_scores_{fsc_curve_type}.csv')
+    scores_path = _OUTPUT_DIR / f'typicality_scores_{fsc_curve_type}.csv'
+    results_df.to_csv(scores_path, index=False)
+    print(f'✓ Saved typicality scores to: {scores_path}')
 
     print(f"\n{'=' * 70}")
     print('TYPICALITY SUMMARY STATISTICS')
@@ -80,7 +77,7 @@ def main() -> None:
 
     print(f'Total curves analyzed: {len(results_df)}')
     print('\nCounts by typicality class:')
-    for class_name in ['Typical', 'Atypical', 'Atypical_Outlier', 'Mixed']:
+    for class_name in ['Typical', 'Atypical']:
         count = (results_df['typicality_class'] == class_name).sum()
         pct = 100 * count / len(results_df)
         print(f'  {class_name:20s}: {count:5d} ({pct:5.1f}%)')
@@ -133,18 +130,14 @@ def main() -> None:
     ax.grid(True, alpha=0.3, axis='y')
 
     plt.tight_layout()
-    plt.savefig(f'typicality_distribution_{fsc_curve_type}.png', dpi=300, bbox_inches='tight')
-    print(f'✓ Saved: typicality_distribution_{fsc_curve_type}.png')
+    dist_path = _OUTPUT_DIR / f'typicality_distribution_{fsc_curve_type}.png'
+    plt.savefig(dist_path, dpi=300, bbox_inches='tight')
+    print(f'✓ Saved: {dist_path}')
     plt.close()
 
     fig, ax = plt.subplots(figsize=(12, 8))
-    colors = {
-        'Typical': 'green',
-        'Atypical': 'red',
-        'Atypical_Outlier': 'orange',
-        'Mixed': 'gray',
-    }
-    for class_name in ['Mixed', 'Atypical', 'Atypical_Outlier', 'Typical']:
+    colors = {'Typical': 'green', 'Atypical': 'red'}
+    for class_name in ['Atypical', 'Typical']:
         class_data = results_df[results_df['typicality_class'] == class_name]
         ax.scatter(
             class_data['distance'],
@@ -160,31 +153,34 @@ def main() -> None:
     ax.legend()
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(f'typicality_vs_distance_{fsc_curve_type}.png', dpi=300, bbox_inches='tight')
-    print(f'✓ Saved: typicality_vs_distance_{fsc_curve_type}.png')
+    vs_dist_path = _OUTPUT_DIR / f'typicality_vs_distance_{fsc_curve_type}.png'
+    plt.savefig(vs_dist_path, dpi=300, bbox_inches='tight')
+    print(f'✓ Saved: {vs_dist_path}')
     plt.close()
 
     fig, ax = plt.subplots(figsize=(12, 6))
     cluster_class_counts = pd.crosstab(results_df['cluster'], results_df['typicality_class'])
-    cluster_class_counts.plot(kind='bar', stacked=True, ax=ax, color=['green', 'red', 'orange', 'gray'])
+    cluster_class_counts = cluster_class_counts.reindex(columns=['Typical', 'Atypical'], fill_value=0)
+    cluster_class_counts.plot(kind='bar', stacked=True, ax=ax, color=['green', 'red'])
     ax.set_xlabel('Cluster ID')
     ax.set_ylabel('Count')
     ax.set_title(f'Typicality Class Distribution per Cluster - {fsc_curve_type}')
     ax.legend(title='Typicality Class', bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.xticks(rotation=0)
     plt.tight_layout()
-    plt.savefig(f'typicality_by_cluster_{fsc_curve_type}.png', dpi=300, bbox_inches='tight')
-    print(f'✓ Saved: typicality_by_cluster_{fsc_curve_type}.png')
+    by_cluster_path = _OUTPUT_DIR / f'typicality_by_cluster_{fsc_curve_type}.png'
+    plt.savefig(by_cluster_path, dpi=300, bbox_inches='tight')
+    print(f'✓ Saved: {by_cluster_path}')
     plt.close()
 
     print(f"\n{'=' * 70}")
     print('✓ COMPLETE!')
     print(f"{'=' * 70}")
     print('\nOutput files:')
-    print(f'  - typicality_scores_{fsc_curve_type}.csv')
-    print(f'  - typicality_distribution_{fsc_curve_type}.png')
-    print(f'  - typicality_vs_distance_{fsc_curve_type}.png')
-    print(f'  - typicality_by_cluster_{fsc_curve_type}.png')
+    print(f'  - {scores_path}')
+    print(f'  - {dist_path}')
+    print(f'  - {vs_dist_path}')
+    print(f'  - {by_cluster_path}')
 
 
 if __name__ == '__main__':

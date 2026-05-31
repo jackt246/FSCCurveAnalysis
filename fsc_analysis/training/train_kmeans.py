@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import random
@@ -187,7 +188,35 @@ if __name__ == "__main__":
     kmeans = KMeans(n_clusters=n_clusters, n_init=20, random_state=42)
     labels = kmeans.fit_predict(refined_embeddings)
 
-    # Optional: Visualize with UMAP
+    # Persist the normalisation parameters so inference can reproduce the exact
+    # global min-max scaling the encoder was trained on.
+    with open(f"models/normalisation_{fsc_curve_type}.json", "w") as fh:
+        json.dump({"data_min": float(data_min), "data_max": float(data_max)}, fh)
+
+    # Per-cluster centroid-distance statistics. These define a single, shared
+    # typicality scale: distance from the assigned cluster centroid in latent
+    # space, with a threshold (mean + 1.5*std) beyond which a curve is atypical.
+    centroids_per_sample = kmeans.cluster_centers_[labels]
+    sample_distances = np.sqrt(np.sum((refined_embeddings - centroids_per_sample) ** 2, axis=1))
+    distance_df = pd.DataFrame({"cluster": labels, "distance": sample_distances})
+
+    distance_stats = []
+    for cid, group in distance_df.groupby("cluster"):
+        d = group["distance"].values
+        distance_stats.append({
+            "cluster_id": int(cid),
+            "size": int(len(d)),
+            "mean_distance": float(d.mean()),
+            "std_distance": float(d.std()),
+            "median_distance": float(np.median(d)),
+            "percentile_90": float(np.percentile(d, 90)),
+            "percentile_95": float(np.percentile(d, 95)),
+            "threshold": float(d.mean() + 1.5 * d.std()),
+        })
+    pd.DataFrame(distance_stats).to_csv(
+        f"models/cluster_distance_stats_{fsc_curve_type}.csv", index=False
+    )
+    print("Saved normalisation parameters and per-cluster distance statistics.")
     print("Projecting with UMAP")
     umap_proj = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=3, random_state=42).fit_transform(refined_embeddings)
 

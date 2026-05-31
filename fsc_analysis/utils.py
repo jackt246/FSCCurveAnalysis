@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,16 +18,43 @@ from scipy.interpolate import interp1d
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL_DIR = Path(__file__).resolve().parent.parent / "models"
+DEFAULT_CURVE_TYPE = "fsc_masked"
+
+
+def set_seeds(seed: int = 42) -> None:
+    """Seed Python, NumPy, and (if available) TensorFlow for reproducible runs."""
+    import random
+
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    try:
+        import tensorflow as tf
+
+        tf.random.set_seed(seed)
+        tf.keras.utils.set_random_seed(seed)
+    except ImportError:
+        logger.debug("TensorFlow not available; skipping TF seeding.")
 
 
 @dataclass
 class FSCModels:
-    """Container for the loaded FSC analysis models and cluster metadata."""
+    """Container for the loaded FSC analysis models and inference metadata.
+
+    Attributes:
+        encoder: Trained autoencoder encoder.
+        kmeans: Fitted KMeans model (exposes ``cluster_centers_``).
+        data_min: Global minimum used to normalise the training data.
+        data_max: Global maximum used to normalise the training data.
+        cluster_thresholds: Per-cluster distance threshold (indexed by cluster id)
+            beyond which a curve is considered atypical for that cluster.
+    """
 
     encoder: Any
     kmeans: Any
-    cluster_freq: pd.Series
-    cluster_percentiles: pd.Series
+    data_min: float
+    data_max: float
+    cluster_thresholds: pd.Series
 
 
 def resample_curve(curve: np.ndarray, target_length: int = 100) -> np.ndarray:
@@ -89,6 +118,22 @@ def anchor_curve(
     return final_interp(source_indices)
 
 
+def normalize_curve(
+    curve: np.ndarray,
+    data_min: float,
+    data_max: float,
+) -> np.ndarray:
+    """Apply the training-time global min-max normalisation to a curve.
+
+    Uses the ``data_min``/``data_max`` persisted from training so a single
+    curve is scaled identically to the data the encoder was trained on.
+    """
+    arr = np.asarray(curve, dtype=float)
+    if data_max == data_min:
+        return arr
+    return (arr - data_min) / (data_max - data_min)
+
+
 def fetch_fsc_curve(emd_id: str) -> list:
     """Fetch the FSC curve for an EMDB entry from the EBI API.
 
@@ -118,48 +163,71 @@ def fetch_fsc_curve(emd_id: str) -> list:
         raise ValueError(f"No FSC data found for {emd_id}") from exc
 
 
-def load_models(model_dir: Path = _DEFAULT_MODEL_DIR) -> FSCModels:
-    """Load the encoder, KMeans model, and cluster metadata from *model_dir*.
+def load_models(
+    model_dir: Path = _DEFAULT_MODEL_DIR,
+    curve_type: str = DEFAULT_CURVE_TYPE,
+) -> FSCModels:
+    """Load the encoder, KMeans model, and inference metadata from *model_dir*.
 
-    Note:
-        The encoder was trained with global min-max normalisation applied to
-        the full training set. Inference accuracy requires the same normalisation;
-        save ``data_min``/``data_max`` from training and apply them here once
-        those artefacts are available.
+    Loads the artefacts produced by ``train_kmeans`` for *curve_type*:
+    the encoder, the KMeans model, the persisted normalisation parameters
+    (``data_min``/``data_max``), and the per-cluster centroid-distance
+    thresholds used to score typicality.
     """
     from tensorflow.keras.models import load_model  # noqa: PLC0415 – deferred TF import
 
-    encoder = load_model(model_dir / "encoder_model.h5")
-    kmeans = joblib.load(model_dir / "kmeans_model.pkl")
-    cluster_freq = pd.read_csv(model_dir / "cluster_frequencies.csv", index_col=0)["count"]
-    cluster_percentiles = cluster_freq.rank(pct=True)
+    encoder = load_model(model_dir / f"encoder_model_{curve_type}.h5")
+    kmeans = joblib.load(model_dir / f"kmeans_model_{curve_type}.pkl")
+
+    with open(model_dir / f"normalisation_{curve_type}.json") as fh:
+        norm = json.load(fh)
+
+    stats = pd.read_csv(model_dir / f"cluster_distance_stats_{curve_type}.csv")
+    cluster_thresholds = stats.set_index("cluster_id")["threshold"]
 
     return FSCModels(
         encoder=encoder,
         kmeans=kmeans,
-        cluster_freq=cluster_freq,
-        cluster_percentiles=cluster_percentiles,
+        data_min=float(norm["data_min"]),
+        data_max=float(norm["data_max"]),
+        cluster_thresholds=cluster_thresholds,
     )
 
 
 def classify_fsc_curve(
     fsc_curve: np.ndarray,
     models: FSCModels,
-) -> tuple[int, int, float]:
-    """Classify a preprocessed FSC curve using the trained encoder and KMeans model.
+) -> tuple[int, float, float]:
+    """Score a preprocessed FSC curve by its distance from its cluster centroid.
+
+    The curve is normalised with the training-time parameters, encoded, and
+    assigned to its nearest KMeans cluster. Typicality is derived from the
+    Euclidean distance to that cluster's centroid in latent space, scaled by
+    the cluster's distance threshold:
+    ``typicality = clip(1 - distance / threshold, 0, 1)`` (1.0 = sits on the
+    centroid, 0.0 = at or beyond the atypicality threshold).
 
     Args:
-        fsc_curve: Preprocessed curve array of the length used during training.
+        fsc_curve: Preprocessed (anchored) curve of the training length.
         models: Loaded :class:`FSCModels` instance.
 
     Returns:
-        ``(cluster_id, frequency, typicality_percentile)``
+        ``(cluster_id, distance_from_centroid, typicality)``
     """
-    encoded = models.encoder.predict(fsc_curve.reshape(1, -1), verbose=0)
-    cluster_id = int(models.kmeans.predict(encoded)[0])
-    frequency = int(models.cluster_freq.get(cluster_id, 0))
-    percentile = float(models.cluster_percentiles.get(cluster_id, 0.0))
-    return cluster_id, frequency, percentile
+    normalized = normalize_curve(fsc_curve, models.data_min, models.data_max)
+    embedding = models.encoder.predict(normalized.reshape(1, -1), verbose=0)
+    cluster_id = int(models.kmeans.predict(embedding)[0])
+
+    centroid = np.asarray(models.kmeans.cluster_centers_[cluster_id], dtype=float)
+    distance = float(np.sqrt(np.sum((np.asarray(embedding[0], dtype=float) - centroid) ** 2)))
+
+    threshold = float(models.cluster_thresholds.get(cluster_id, np.nan))
+    if not np.isfinite(threshold) or threshold <= 0:
+        typicality = 0.0
+    else:
+        typicality = float(np.clip(1.0 - distance / threshold, 0.0, 1.0))
+
+    return cluster_id, distance, typicality
 
 
 def draw_typicality_bar(percentile: float, width: int = 40) -> None:

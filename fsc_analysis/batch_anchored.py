@@ -46,10 +46,10 @@ def main() -> None:
             continue
 
         processed = anchor_curve(np.array(fsc_curve))
-        cluster_id, freq, perc = classify_fsc_curve(processed, models)
-        print(f"{emd_id}: Cluster ID = {cluster_id}, Frequency = {freq}, Typicality Percentile = {perc * 100:.2f}%")
-        draw_typicality_bar(perc)
-        results.append((emd_id, perc))
+        cluster_id, distance, typicality = classify_fsc_curve(processed, models)
+        print(f"{emd_id}: Cluster ID = {cluster_id}, Distance = {distance:.4f}, Typicality = {typicality * 100:.2f}%")
+        draw_typicality_bar(typicality)
+        results.append((emd_id, typicality))
         aligned_curves.append(processed)
 
     if not results:
