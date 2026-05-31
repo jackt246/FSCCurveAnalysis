@@ -1,4 +1,0 @@
-Configuration,Typical,Atypical,Outliers,Mixed,Mean Score,Median Score
-conservative,15827,534,39,0,0.7832,0.7891
-moderate,4026,4730,85,7559,0.4027,0.5000
-lenient,4092,4730,19,7559,0.4201,0.5000

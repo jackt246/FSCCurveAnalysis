@@ -70,7 +70,7 @@ def edit_curve_based_on_crossing(y_values, target_idx=50, output_length=100):
 
     return final_interp(source_indices)
 
-df = pd.read_json('fsc_curves/fsc_curves_all.json')
+df = pd.read_json('data/fsc_curves_all.json')
 
 df["fsc_unmasked"] = df["fsc_unmasked"].apply(np.asarray)
 df["fsc_masked"] = df["fsc_masked"].apply(np.asarray)
